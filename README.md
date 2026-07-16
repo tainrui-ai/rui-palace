@@ -1,2 +1,0 @@
-# rui-palace
-website 
