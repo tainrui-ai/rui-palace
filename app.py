@@ -5,43 +5,88 @@ from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import yt_dlp
 
-# 引入 ReportLab 用于安全地生成 PDF 报告
+# 引入 ReportLab 用于安全生成 PDF
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from io import BytesIO
 
+# 注册中文字体所需的 ReportLab 核心模块
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
 app = Flask(__name__)
 
-# 配置跨域（允许你的前端域名 rui-palace.com 以及本地调试）
+# 配置跨域，允许你的前端域名及本地调试环境
 CORS(app, resources={r"/api/*": {
     "origins": ["https://www.rui-palace.com", "https://rui-palace.com", "http://127.0.0.1:5500", "http://localhost:5500"],
     "methods": ["POST", "OPTIONS"],
     "allow_headers": ["Content-Type"]
 }})
 
+# ==================== 🛠 字体注册逻辑 (FONT REGISTRATION) ====================
+CHINESE_FONT_NAME = 'Helvetica'  # 默认安全回退字体
+
+def register_chinese_font():
+    """
+    自适应加载你上传的 simsun.ttc 或 SourceHanSans-Regular.ttf。
+    """
+    global CHINESE_FONT_NAME
+    
+    # 1. 优先尝试加载宋体 (simsun.ttc)，兼容性最完美
+    simsun_path = os.path.join(os.path.dirname(__file__), 'fonts', 'simsun.ttc')
+    
+    # 2. 备选尝试加载新下载的思源黑体 (SourceHanSans-Regular.ttf)
+    shs_path = os.path.join(os.path.dirname(__file__), 'fonts', 'SourceHanSans-Regular.ttf')
+    
+    # 3. 垫底备份：Linux (Render) 系统内置中文字体路径
+    system_font_path = "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"
+    
+    try:
+        if os.path.exists(simsun_path):
+            # ttc 格式必须指定 subfontIndex=0 来读取“新宋体/宋体”
+            pdfmetrics.registerFont(TTFont('ChineseFont', simsun_path, subfontIndex=0))
+            CHINESE_FONT_NAME = 'ChineseFont'
+            print("🎉 成功注册项目本地中文字体: 宋体 (simsun.ttc)")
+            
+        elif os.path.exists(shs_path):
+            pdfmetrics.registerFont(TTFont('ChineseFont', shs_path))
+            CHINESE_FONT_NAME = 'ChineseFont'
+            print("🎉 成功注册项目本地中文字体: 思源黑体 (SourceHanSans-Regular.ttf)")
+            
+        elif os.path.exists(system_font_path):
+            pdfmetrics.registerFont(TTFont('ChineseFont', system_font_path, subfontIndex=0))
+            CHINESE_FONT_NAME = 'ChineseFont'
+            print("🎉 成功注册 Linux 系统内置中文字体: 文泉驿微米黑")
+            
+        else:
+            print("⚠️ 未在 fonts/ 目录下检测到有效字体，将回退至 Helvetica 渲染")
+            
+    except Exception as e:
+        print(f"❌ 注册中文字体时发生错误: {str(e)}")
+        print("⚠️ 自动回退到默认 Helvetica 渲染")
+
+# 执行字体注册
+register_chinese_font()
+# ===========================================================================
+
 def extract_playlist_info(playlist_url):
     """
-    使用 yt-dlp 提取播放列表信息。
-    yt-dlp 比 pytube 更加稳定，能有效抵抗 YouTube 频繁的接口调整。
+    使用 yt-dlp 提取播放列表信息，此库更新极快，能有效绕过 YouTube 的反爬限制。
     """
     ydl_opts = {
-        'extract_flat': True,  # 仅提取列表元数据，不下载视频，速度极快
+        'extract_flat': True,
         'skip_download': True,
         'quiet': True
     }
-    
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        # extract_info 会直接抛出异常，交给外层 try-except 统一捕获
         playlist_dict = ydl.extract_info(playlist_url, download=False)
-        
         playlist_title = playlist_dict.get('title', 'YouTube Playlist')
         videos = []
-        
         if 'entries' in playlist_dict:
             for entry in playlist_dict['entries']:
-                if entry: # 过滤掉可能失效的视频项
+                if entry:
                     videos.append({
                         'title': entry.get('title', 'Unknown Title'),
                         'url': f"https://www.youtube.com/watch?v={entry.get('id')}" if entry.get('id') else playlist_url
@@ -50,7 +95,7 @@ def extract_playlist_info(playlist_url):
 
 def generate_pdf_buffer(title, videos, lang='zh'):
     """
-    在内存中生成 PDF 报告，避免磁盘写入，完美契合 Render 等只读容器环境。
+    在内存中生成包含中文且格式整齐的 PDF 报告。
     """
     buffer = BytesIO()
     doc = SimpleDocTemplate(
@@ -59,65 +104,65 @@ def generate_pdf_buffer(title, videos, lang='zh'):
         rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40
     )
     story = []
-    
-    # 样式集初始化
     styles = getSampleStyleSheet()
     
-    # 针对 Render 等 Linux 环境进行安全的字体配置
-    # 由于系统可能缺失中文字体，这里配置 Helvetica 回退，并清洗文本
+    # 动态应用已成功注册的字体
     title_style = ParagraphStyle(
         'DocTitle',
         parent=styles['Heading1'],
-        fontName='Helvetica-Bold',
-        fontSize=20,
-        leading=24,
-        textColor=colors.HexColor('#4A3E3D'), # 枝干深褐
-        alignment=1 # 居中
+        fontName=CHINESE_FONT_NAME,
+        fontSize=18,
+        leading=22,
+        textColor=colors.HexColor('#4A3E3D'),
+        alignment=1
     )
     
     item_style = ParagraphStyle(
         'VideoItem',
         parent=styles['Normal'],
-        fontName='Helvetica',
-        fontSize=10,
-        leading=14,
+        fontName=CHINESE_FONT_NAME,
+        fontSize=9,
+        leading=13,
         textColor=colors.HexColor('#4A3E3D')
     )
 
     link_style = ParagraphStyle(
         'VideoLink',
         parent=styles['Normal'],
-        fontName='Helvetica',
+        fontName=CHINESE_FONT_NAME,
         fontSize=9,
-        leading=14,
-        textColor=colors.HexColor('#F4D1C6') # 杏花粉色链接
+        leading=13,
+        textColor=colors.HexColor('#F4D1C6')
     )
 
-    # 1. 写入标题
-    story.append(Paragraph(clean_text(title), title_style))
+    # 1. 标题
+    story.append(Paragraph(title, title_style))
     story.append(Spacer(1, 15))
     
-    # 2. 写入说明文本
-    meta_text = f"Total Videos: {len(videos)} | Generated by Rui Palace"
-    meta_style = ParagraphStyle('Meta', parent=styles['Normal'], fontName='Helvetica', fontSize=9, textColor=colors.HexColor('#8C7A78'), alignment=1)
+    # 2. 元信息
+    meta_text = f"Total Videos / 视频总数: {len(videos)} | Generated by Rui Palace"
+    meta_style = ParagraphStyle(
+        'Meta', 
+        parent=styles['Normal'], 
+        fontName=CHINESE_FONT_NAME, 
+        fontSize=9, 
+        textColor=colors.HexColor('#8C7A78'), 
+        alignment=1
+    )
     story.append(Paragraph(meta_text, meta_style))
     story.append(Spacer(1, 20))
     
-    # 3. 构建精美的视频格栅数据
+    # 3. 视频表格数据构建
     table_data = []
-    # 表头
     headers = ["#", "Video Title / 视频名称", "Interactive Link / 播放链接"]
     table_data.append([
-        Paragraph(f"<b>{h}</b>", ParagraphStyle('H', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=10, textColor=colors.white)) 
+        Paragraph(f"<b>{h}</b>", ParagraphStyle('H', parent=styles['Normal'], fontName=CHINESE_FONT_NAME, fontSize=9, textColor=colors.white)) 
         for h in headers
     ])
     
-    # 填充表格内容
     for idx, video in enumerate(videos, 1):
-        clean_video_title = clean_text(video['title'])
+        clean_video_title = clean_xml_char(video['title'])
         video_url = video['url']
-        
-        # 将链接包装为 PDF 内可直接点击的超链接
         link_html = f'<a href="{video_url}" color="#E8BFA2"><u>Click to Play / 点击播放</u></a>'
         
         row = [
@@ -127,106 +172,75 @@ def generate_pdf_buffer(title, videos, lang='zh'):
         ]
         table_data.append(row)
     
-    # 定义表格样式（契合“蕊宫”配色风格）
-    col_widths = [30, 340, 160] # 合计 530 磅 (Letter 宽度 612 - 左右边距 80)
+    col_widths = [30, 340, 160]
     video_table = Table(table_data, colWidths=col_widths)
-    
     video_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#4A3E3D')), # 枝干深褐表头
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#4A3E3D')),
         ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-        ('TOPPADDING', (0, 0), (-1, -1), 8),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#FDF6F0')]), # 杏花白交替背景
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#F4D1C6')), # 浅粉色细边框
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#FDF6F0')]),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#F4D1C6')),
     ]))
     
     story.append(video_table)
-    
-    # 4. 生成 PDF 
     doc.build(story)
     buffer.seek(0)
     return buffer
 
-def clean_text(text):
+def clean_xml_char(text):
     """
-    因为在无中文字体的 Linux 容器下，ReportLab 遇到无法识别的非 ASCII 字符（如中文或特殊 emoji）
-    可能会直接抛出异常导致 500 崩溃。
-    这里做一个安全过滤：将特殊字符及无法在默认 Helvetica 编码中渲染的字符安全转换，确保 PDF 绝不崩溃。
+    过滤 XML 敏感控制字符，防止 ReportLab 的 XML 解析引擎抛出未捕获异常。
     """
     if not text:
         return ""
-    # 对 XML 敏感字符进行转义，防止 ReportLab 的 HTML 标签解析器崩溃
-    text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-    
-    # 安全回退编码：将字符尝试用 latin-1 编码，不支持的转换为 ascii 替代字符，防止 ReportLab 生成 PDF 时崩溃
-    # 提示：若后续需要原生中文字体支持，需要显式引入 .ttf 中文字体文件并注册（详情看下方排查指南）。
-    try:
-        text.encode('latin-1')
-        return text
-    except UnicodeEncodeError:
-        # 如果包含中文，采用安全的混编处理或转换，防止 PDF 引擎抛出致命异常
-        # 这里将其安全地保持 Unicode，但在渲染时若字体不支持，会显示为黑框或问号，而“绝不会导致 500 崩溃”
-        return text
+    return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
 @app.route('/', methods=['GET', 'HEAD'])
 def index():
-    """用于健康检查"""
     return jsonify({"status": "healthy", "service": "Rui Palace PDF API"}), 200
 
 @app.route('/api/generate-pdf', methods=['POST'])
 def generate_pdf():
-    # 核心保障：包裹所有运行逻辑，让错误无处遁形
     try:
         data = request.get_json()
         if not data:
-            print("❌ Error: Request body is missing")
-            return jsonify({"error": "请求体不能为空 (Request body is missing)"}), 400
+            return jsonify({"error": "请求体不能为空"}), 400
         
         playlist_url = data.get('url')
         lang = data.get('lang', 'zh')
         
         if not playlist_url:
-            print("❌ Error: URL parameter is missing")
-            return jsonify({"error": "未提供播放列表链接 (Missing 'url' parameter)"}), 400
+            return jsonify({"error": "未提供播放列表链接"}), 400
         
-        print(f"📥 Received Request: {playlist_url} [Language: {lang}]")
-        
-        # 1. 提取 YouTube 播放列表数据
-        print("🔄 Extracting playlist via yt-dlp...")
+        # 1. 解析播放列表
         playlist_title, videos = extract_playlist_info(playlist_url)
-        print(f"✅ Extracted Successfully: '{playlist_title}' containing {len(videos)} videos.")
         
         if not videos:
-            return jsonify({"error": "未能在该链接中解析到任何有效的视频，请确保该列表为公开列表 (No videos found in this playlist)"}), 404
+            return jsonify({"error": "未能解析到有效视频"}), 404
         
-        # 2. 生成 PDF 字节流
-        print("🔄 Generating PDF in memory...")
+        # 2. 生成内存 PDF 缓冲
         pdf_buffer = generate_pdf_buffer(playlist_title, videos, lang)
-        print("✅ PDF Generated successfully.")
         
-        # 3. 将文件安全发送回前端
+        # 3. 安全返回文件流
         return send_file(
             pdf_buffer,
             mimetype='application/pdf',
             as_attachment=True,
-            download_name=f"Playlist_{playlist_title[:10]}.pdf"
+            download_name=f"Playlist_Export.pdf"
         )
         
     except Exception as e:
-        # 核心亮剑：如果程序在内部发生任何崩溃，在控制台打印完整的 Traceback 堆栈信息！
-        print("\n=== 💥 后端致命错误追踪 (BACKEND FATAL EXCEPTION) 💥 ===")
+        # 打印详细崩溃栈至 Render 控制台
+        print("\n=== 💥 后端致命错误追踪 💥 ===")
         traceback.print_exc()
-        print("========================================================\n")
-        
-        # 将具体的原因包装后送给前端，拒绝无用 500
-        error_msg = str(e)
+        print("=============================\n")
         return jsonify({
             "error": "服务器内部错误",
-            "details": error_msg
+            "details": str(e)
         }), 500
 
 if __name__ == '__main__':
-    # Render 部署时，Gunicorn 会绑定 PORT 环境变量，本地则默认 10000 端口
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
